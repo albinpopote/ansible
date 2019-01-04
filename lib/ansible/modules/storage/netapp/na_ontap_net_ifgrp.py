@@ -142,6 +142,7 @@ class NetAppOntapIfGrp(object):
         if_group_info = netapp_utils.zapi.NaElement('net-port-info')
         if_group_info.add_new_child('port', self.name)
         if_group_info.add_new_child('port-type', 'if_group')
+        if_group_info.add_new_child('node', self.node)
         query = netapp_utils.zapi.NaElement('query')
         query.add_child_elem(if_group_info)
         if_group_iter.add_child_elem(query)
