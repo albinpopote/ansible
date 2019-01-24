@@ -9,11 +9,11 @@ __metaclass__ = type
 
 ANSIBLE_METADATA = {'metadata_version': '1.1',
                     'status': ['preview'],
-                    'supported_by': 'certified'}
+                    'supported_by': 'community'}
 
 DOCUMENTATION = """
 module: na_ontap_storage_pool
-short_description: NetApp Ontap create, modify and delete storage pool.
+short_description: NetApp ONTAP create, modify and delete storage pool.
 extends_documentation_fragment:
     - netapp.na_ontap
 version_added: '2.8'
@@ -27,7 +27,7 @@ options:
     choices: ['present', 'absent']
     default: present
 
-  disk-count:
+  disk_count:
     description:
     - Specify the number of disks that are part of the storage pool.
 
@@ -39,15 +39,27 @@ options:
   from_name:
     description:
     - Name of the storage pool to be renamed
-    - The rename function is only supported with Ontap version 9.5 and later.
+    - The rename function is only supported with ONTAP version 9.5 and later.
 
-  disk-list:
+  disk_list:
     description:
     - Specify the list of disks that should be used to create the storage pool.
 
   nodes:
     description:
     - Specify the list of nodes in which the storage pool resides.
+
+  from_node:
+    description:
+    - Specify the source node
+
+  to_node:
+    description:
+    - Specify the destination node
+
+  allocation_units:
+    description:
+    - Specify units tata toto test
 """
 
 EXAMPLES = """
@@ -75,6 +87,16 @@ EXAMPLES = """
         hostname: "{{ netapp_hostname }}"
         name: NewFlashPool
         from_name: FlashPool
+    - name: reassign allocation unit to node
+      na_ontap_storage_pool:
+        state: present
+        username: "{{ netapp_username }}"
+        password: "{{ netapp_password }}"
+        hostname: "{{ netapp_hostname }}"
+        name: FlashPool
+        from_node: VSIMNODE01
+        to_node: VSIMNODE02
+        allocation_units: 2
 """
 
 RETURN = """
@@ -99,7 +121,7 @@ class NetAppOntapStoragePool(object):
     """
     def __init__(self):
         """
-        Initialize the Ontap Storage Pool class
+        Initialize the ONTAP Storage Pool class
         """
         self.argument_spec = netapp_utils.na_ontap_host_argument_spec()
         self.argument_spec.update(dict(
@@ -108,11 +130,15 @@ class NetAppOntapStoragePool(object):
             from_name=dict(required=False, type='str'),
             disk_count=dict(required=False, type='int'),
             disk_list=dict(required=False, type='list'),
-            nodes=dict(required=False, type='list')
+            nodes=dict(required=False, type='list'),
+            from_node=dict(required=False, type='str'),
+            to_node=dict(required=False, type='str'),
+            allocation_units=dict(required=False, type='int')
         ))
 
         self.module = AnsibleModule(
             argument_spec=self.argument_spec,
+            required_together=[['from_node', 'to_node', 'allocation_units']],
             supports_check_mode=True
         )
         self.na_helper = NetAppModule()
@@ -137,7 +163,7 @@ class NetAppOntapStoragePool(object):
 
         pool_iter = netapp_utils.zapi.NaElement('storage-pool-get-iter')
         pool_info = netapp_utils.zapi.NaElement('storage-pool-info')
-        pool_info.add_new_child( 'storage-pool', name)
+        pool_info.add_new_child('storage-pool', name)
 
         query = netapp_utils.zapi.NaElement('query')
         query.add_child_elem(pool_info)
@@ -171,9 +197,49 @@ class NetAppOntapStoragePool(object):
 
         return return_value
 
+    def get_aggregate_used(self):
+        """
+        """
+        aggr_iter = netapp_utils.zapi.NaElement('storage-pool-aggregate-get-iter')
+        agggr_info = netapp_utils.zapi.NaElement('storage-pool-aggregate-info')
+        agggr_info.add_new_child('storage-pool', self.parameters.get('name'))
+
+        query = netapp_utils.zapi.NaElement('query')
+        query.add_child_elem(agggr_info)
+
+        aggr_iter.add_child_elem(query)
+
+        try:
+            result = self.server.invoke_successfully(aggr_iter, True)
+        except netapp_utils.zapi.NaApiError as error:
+            self.module.fail_json(msg='Error getting aggregate info from storage pool %s: %s' % (self.parameters.get('name'),
+                                  to_native(error)), exception=traceback.format_exc())
+        return result
+
+    def get_ontap_version(self):
+        """
+        Get ontap version to check if rename function is supported on the API
+        """
+        system = netapp_utils.zapi.NaElement('system-get-version')
+        try:
+            result = self.server.invoke_successfully(system, True)
+        except netapp_utils.zapi.NaApiError as error:
+            self.module.fail_json(msg='Error getting ONTAP version: %s' % to_native(error),
+                                  exception=traceback.format_exc())
+
+        system_version = None
+        version_tuple = result.get_child_by_name('version-tuple').get_child_by_name('system-version-tuple')
+        if version_tuple:
+            system_version = version_tuple.get_child_content('generation') + '.' + version_tuple.get_child_content('major')
+
+        if system_version is None:
+            self.module.fail_json(msg='Unable to find ontap version', exception=traceback.format_exc())
+
+        return system_version
+
     def create_storage_pool(self):
         """
-        Creates a new storage pool
+        Create a new storage pool
         """
         options = {'storage-pool': self.parameters.get('name')}
 
@@ -201,8 +267,14 @@ class NetAppOntapStoragePool(object):
 
     def delete_storage_pool(self):
         """
-        Deletes a storage pool
+        Delete a storage pool
         """
+        agrr_list = self.get_aggregate_used()
+        if agrr_list.get_child_by_name('num-records') and \
+                int(agrr_list.get_child_content('num-records')) == 1:
+            self.module.fail_json(msg='Cannot delete the used storage pool %s' % self.parameters.get('name'),
+                                  exception=traceback.format_exc())
+
         pool_delete = netapp_utils.zapi.NaElement.create_node_with_children(
             'storage-pool-delete', **{'storage-pool': self.parameters.get('name')})
 
@@ -228,29 +300,25 @@ class NetAppOntapStoragePool(object):
             self.module.fail_json(msg='Error renaming storage pool %s: %s' % (self.parameters.get('name'), to_native(error)),
                                   exception=traceback.format_exc())
 
-    def get_ontap_version(self):
+    def reassign_allocation_units(self):
         """
-        Get ontap version to check if rename function is supported on the API
+        Reassign allocation unit(s) from one node to another
         """
-        system = netapp_utils.zapi.NaElement('system-get-version')
+        options = {'from-node': self.parameters.get('from_node'),
+                   'to-node': self.parameters.get('to_node'),
+                   'allocation-units': str(self.parameters.get('allocation_units')),
+                   'storage-pool': self.parameters.get('name')}
+        pool_reassign = netapp_utils.zapi.NaElement.create_node_with_children(
+            'storage-pool-reassign', **options)
+
         try:
-            result = self.server.invoke_successfully(system, True)
+            self.server.invoke_successfully(pool_reassign, True)
         except netapp_utils.zapi.NaApiError as error:
-            self.module.fail_json(msg='Error getting Ontap version: %s' % to_native(error),
+            self.module.fail_json(msg='Error reallocating units on storage pool %s: %s' % (self.parameters.get('name'), to_native(error)),
                                   exception=traceback.format_exc())
 
-        system_version = None
-        version_tuple = result.get_child_by_name('version-tuple').get_child_by_name('system-version-tuple')
-        if version_tuple:
-            system_version = version_tuple.get_child_content('generation') + '.' + version_tuple.get_child_content('major')
-
-        if system_version is None:
-            self.module.fail_json(msg='Unable to find ontap version', exception=traceback.format_exc())
-
-        return system_version
-
     def add_storage_pool(self, current):
-     	"""
+        """
         Add disk to storage pool
         """
         options = {'storage-pool': self.parameters.get('name')}
@@ -261,17 +329,17 @@ class NetAppOntapStoragePool(object):
         modify = self.na_helper.get_modified_attributes(current, self.parameters)
         if "disk_count" in modify:
             if int(current['disk_count']) > int(self.parameters.get('disk_count')):
-                self.module.fail_json(msg='Error modifying storage pool %s: can not decrease disk count.' % self.parameters.get('name'),
+                self.module.fail_json(msg='Error modifying storage pool %s: cannot decrease disk count.' % self.parameters.get('name'),
                                       exception=traceback.format_exc())
 
-            add_disk = int( self.parameters.get('disk_count')) - int(current['disk_count'])
+            add_disk = int(self.parameters.get('disk_count')) - int(current['disk_count'])
             pool_add.add_new_child('disk-count', str(add_disk))
         elif "disk_list" in modify:
-            if len( current['disk_list']) > len( self.parameters.get('disk_list')):
-                self.module.fail_json(msg='Error modifying storage pool %s: can not decrease disk list.' % self.parameters.get('name'),
+            if len(current['disk_list']) > len(self.parameters.get('disk_list')):
+                self.module.fail_json(msg='Error modifying storage pool %s: cannot decrease disk list.' % self.parameters.get('name'),
                                       exception=traceback.format_exc())
             if not all(elem in current['disk_list'] for elem in self.parameters.get('disk_list')):
-                self.module.fail_json(msg='Error modifying storage pool %s: can not remove a disk from the existing disks list.' % self.parameters.get('name'),
+                self.module.fail_json(msg='Error modifying storage pool %s: cannot remove a disk from the existing disks list.' % self.parameters.get('name'),
                                       exception=traceback.format_exc())
 
             pool_disks = netapp_utils.zapi.NaElement('disk-list')
@@ -282,14 +350,13 @@ class NetAppOntapStoragePool(object):
         try:
             result = self.server.invoke_successfully(pool_add, True)
         except netapp_utils.zapi.NaApiError as error:
-            self.module.fail_json(msg='Error getting Ontap version: %s' % to_native(error),
+            self.module.fail_json(msg='Error getting ONTAP version: %s' % to_native(error),
                                   exception=traceback.format_exc())
 
     def apply(self):
         '''Apply action to storage pool'''
 
         ontap_version = self.get_ontap_version()
-
         current = self.get_storage_pool()
         cd_action, rename = None, None
 
@@ -298,10 +365,16 @@ class NetAppOntapStoragePool(object):
             if rename is None:
                 self.module.fail_json(msg="Error renaming: storage pool %s does not exist" %
                                       self.parameters.get('from_name'))
-            if StrictVersion( ontap_version) < StrictVersion( '9.5'):
-                self.module.fail_json(msg="Error renaming storage pool %s: rename api is only available with DOT 9.5 or later" % self.parameters.get('from_name'))
+            if StrictVersion(ontap_version) < StrictVersion('9.5'):
+                self.module.fail_json(msg="Error renaming storage pool %s: rename api is only available with DOT 9.5 or later" %
+                                      self.parameters.get('from_name'))
 
             self.rename_storage_pool()
+        elif self.parameters.get('from_node'):
+            if current is None:
+                self.module.fail_json(msg="Error reassign: storage pool %s does not exist" %
+                                      self.parameters.get('name'))
+            self.reassign_allocation_units()
         else:
             cd_action = self.na_helper.get_cd_action(current, self.parameters)
 
@@ -321,7 +394,7 @@ class NetAppOntapStoragePool(object):
 
 def main():
     """
-    Creates the NetApp Ontap Net Route object and runs the correct play task
+    Creates the NetApp ONTAP Net Route object and runs the correct play task
     """
     pool_obj = NetAppOntapStoragePool()
     pool_obj.apply()
