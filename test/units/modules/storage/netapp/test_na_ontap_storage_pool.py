@@ -74,7 +74,7 @@ class MockONTAPConnection(object):
                     xml = self.build_storage_pool_info(self.params)
         elif self.type == 'storage-pool-fail':
             raise netapp_utils.zapi.NaApiError(code='TEST', message="This exception is from the unit test")
-        
+
         if xml.get_name() == 'system-get-version':
             pos = self.ontap_version.find('.')
             xml = netapp_utils.zapi.NaElement('xml')
@@ -82,7 +82,7 @@ class MockONTAPConnection(object):
                 'version-tuple': {
                     'system-version-tuple': {
                         'generation': self.ontap_version[:pos],
-                        'major': self.ontap_version[pos+1:],
+                        'major': self.ontap_version[pos + 1:],
                         'minor': '0'
                     }
                 }
@@ -97,7 +97,7 @@ class MockONTAPConnection(object):
                         'storage-pool-aggregate-info': {
                             'storage-pool': self.params['name'],
                             'aggregate': 'aggr1'
-                        }   
+                        }
                     }
                 }
                 xml.translate_struct(attributes)

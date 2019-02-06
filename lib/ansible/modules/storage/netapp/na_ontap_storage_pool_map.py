@@ -305,11 +305,15 @@ class NetAppOntapStoragePoolMap(object):
         aggr_add = netapp_utils.zapi.NaElement.create_node_with_children(
             'aggr-add', **options)
         try:
-            self.server.invoke_successfully(aggr_add, enable_tunneling=True)
+            result = self.server.invoke_successfully(aggr_add, enable_tunneling=True)
         except netapp_utils.zapi.NaApiError as error:
             self.module.fail_json(msg='Error adding allocation units to aggregate %s from strage pool %s: %s' %
                                   (self.parameters.get('storage_pool'), self.parameters.get('aggregate_name'), to_native(error)),
                                   exception=traceback.format_exc())
+
+        if result.get_child_content('result-status') == 'in_progress':
+            job_id = int(result.get_child_content('result-jobid'))
+            self.wait_job(job_id)
 
     def wait_job(self, job_id):
         """
@@ -354,7 +358,7 @@ class NetAppOntapStoragePoolMap(object):
         Create relationship between storage pool and aggregate
         """
         self.get_aggregate()
-        if self.current is None or self.current['hybrid_is_enabled'] == 'false':
+        if self.hybrid_enabled is False:
             self.set_aggregate_option('hybrid_enabled', 'true')
 
         self.add_storage_allocation_unit(self.parameters.get('allocation_units'))

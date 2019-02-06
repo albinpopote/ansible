@@ -60,6 +60,12 @@ options:
   allocation_units:
     description:
     - Specify units tata toto test
+
+  timeout:
+    description:
+    - Time in seconds to wait the reassign allocation between nodes if needed
+    - default is 300 seconds
+    default: 300
 """
 
 EXAMPLES = """
@@ -104,6 +110,7 @@ RETURN = """
 """
 
 import traceback
+import time
 
 from ansible.module_utils.basic import AnsibleModule
 from ansible.module_utils._text import to_native
@@ -131,6 +138,7 @@ class NetAppOntapStoragePool(object):
             disk_count=dict(required=False, type='int'),
             disk_list=dict(required=False, type='list'),
             nodes=dict(required=False, type='list'),
+            timeout=dict(required=False, type='int', default=300),
             from_node=dict(required=False, type='str'),
             to_node=dict(required=False, type='str'),
             allocation_units=dict(required=False, type='int')
@@ -199,6 +207,7 @@ class NetAppOntapStoragePool(object):
 
     def get_aggregate_used(self):
         """
+        Get information about utilization of storage pool by the aggregate
         """
         aggr_iter = netapp_utils.zapi.NaElement('storage-pool-aggregate-get-iter')
         agggr_info = netapp_utils.zapi.NaElement('storage-pool-aggregate-info')
@@ -260,10 +269,14 @@ class NetAppOntapStoragePool(object):
                 pool_nodes.add_new_child('node-name', node)
 
         try:
-            self.server.invoke_successfully(pool_create, True)
+            result = self.server.invoke_successfully(pool_create, True)
         except netapp_utils.zapi.NaApiError as error:
             self.module.fail_json(msg='Error creating storage pool %s: %s' % (self.parameters.get('name'), to_native(error)),
                                   exception=traceback.format_exc())
+
+        if result.get_child_content('result-status') == 'in_progress':
+            job_id = int(result.get_child_content('result-jobid'))
+            self.wait_job(job_id)
 
     def delete_storage_pool(self):
         """
@@ -352,6 +365,44 @@ class NetAppOntapStoragePool(object):
         except netapp_utils.zapi.NaApiError as error:
             self.module.fail_json(msg='Error getting ONTAP version: %s' % to_native(error),
                                   exception=traceback.format_exc())
+
+    def wait_job(self, job_id):
+        """
+        Wait reassign job until it is finihed or timeout
+        :param: job Id to monitor
+        """
+        job_status = None
+        function_time = 0
+
+        options = {'job-id': str(job_id)}
+        job_get_iter = netapp_utils.zapi.NaElement('job-get-iter')
+        query_details = netapp_utils.zapi.NaElement.create_node_with_children(
+            'job-info', **options)
+        query = netapp_utils.zapi.NaElement('query')
+        query.add_child_elem(query_details)
+        job_get_iter.add_child_elem(query)
+
+        while job_status != 'success':
+            time.sleep(1)
+            function_time += 1
+
+            try:
+                result = self.server.invoke_successfully(job_get_iter, enable_tunneling=True)
+            except netapp_utils.zapi.NaApiError as error:
+                self.module.fail_json(msg='Failed to get information from allocation reassign job id %d: %s' %
+                                      (job_id, to_native(error)), exception=traceback.format_exc())
+
+            if result.get_child_by_name('num-records'):
+                records = int(result.get_child_content('num-records'))
+                if records == 0:
+                    job_status = 'success'
+                elif records == 1:
+                    attributes = result.get_child_by_name('attributes-list').get_child_by_name('job-info')
+                    job_status = attributes.get_child_content('job-state')
+
+            if function_time > self.parameters.get('timeout'):
+                self.module.fail_json(msg='Allocation reassign job with id %d was timeout.' %
+                                      job_id, exception=traceback.format_exc())
 
     def apply(self):
         '''Apply action to storage pool'''
